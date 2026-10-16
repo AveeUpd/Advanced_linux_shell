@@ -108,19 +108,28 @@ int command_env(char** env){
 
 char* find_command_in_path(char* command, char** env);
 
+static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "exit", "quit", NULL};
+
+// 1 if name is a shell built-in (these run inside the shell process)
+int is_builtin(const char* name){
+    for(size_t i = 0; built_in_commands[i]; i++){
+        if(my_strcmp(name, built_in_commands[i]) == 0){
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int command_which(char** args, char** env){
     if(args[1] == NULL){
         printf("which: expected argument to \"which [command]\"\n");
         return 1;
     }
 
-    //List of builtins
-    const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "exit", "quit", NULL};
-    for(size_t i = 0; built_in_commands[i]; i++){
-        if(my_strcmp(args[1], built_in_commands[i]) == 0){
-            printf("%s: shell built-in command\n", args[1]);
-            return 0;
-        }
+    //Check builtins
+    if(is_builtin(args[1])){
+        printf("%s: shell built-in command\n", args[1]);
+        return 0;
     }
 
     //Check external commands

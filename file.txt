@@ -1,2 +1,11 @@
-euewu
-eifi
+a.out
+builtins.c
+executor.c
+file.txt
+helpers.c
+input_parser.c
+main.c
+Makefile
+my_shell
+my_shell.h
+tes_dir

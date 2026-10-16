@@ -4,15 +4,25 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 
 
 #define MAX_INPUT 1024
 
+// Redirection info extracted from a command line
+typedef struct redirect_s {
+    char* infile;    // target of '<'  (NULL if none)
+    char* outfile;   // target of '>' or '>>' (NULL if none)
+    int append;      // 1 for '>>', 0 for '>'
+} redirect_t;
+
 char** parse_input(char* input);
 void free_tokens(char** tokens);
+int parse_redirections(char** args, redirect_t* redir);
+void free_redirect(redirect_t* redir);
 
-int shell_builtins(char** args, char** env, char* initial_directory);
+int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir);
 
 //Built in func imp
 int command_cd(char** args, char* initial_directory, char** env);
@@ -20,6 +30,7 @@ int command_pwd();
 int command_echo(char** args, char** env);
 int command_env(char** env);
 int command_which(char** args, char** env);
+int is_builtin(const char* name);
 int command_help();
 int command_history(char** args);
 int command_clear();
@@ -29,7 +40,10 @@ char** command_setenv(char** args, char** env);
 char** command_unsetenv(char** args, char** env);
 
 // Executor
-int executor(char** args, char** env);
+int executor(char** args, char** env, redirect_t* redir);
+int save_std_fds(int saved[2]);
+int apply_redirections(redirect_t* redir);
+void restore_std_fds(int saved[2]);
 int child_process(char** args, char** env);
 
 // Path functions

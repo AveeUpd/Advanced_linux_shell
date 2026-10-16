@@ -1,7 +1,7 @@
 #include "my_shell.h"
 
 // Executes a command by forking and running it in a child process
-int executor(char** args, char** env)
+int executor(char** args, char** env, redirect_t* redir)
 {
     pid_t pid;
     int status;
@@ -14,6 +14,9 @@ int executor(char** args, char** env)
 
     if (pid == 0) // child process
     { 
+        // Redirect only in the child: the shell's own fd 0/1 stay untouched
+        if (apply_redirections(redir) == -1)
+            _exit(1);
         child_process(args, env);   // returns only if exec failed (already reported)
         _exit(127);
     } 
@@ -125,4 +128,69 @@ char** split_paths(char* paths, int* count) {
 
     free(paths_copy);
     return result;
+}
+
+// Opens the redirection targets and dup2()s them onto stdin/stdout.
+// Returns 0 on success, -1 on failure (error already printed).
+int apply_redirections(redirect_t* redir)
+{
+    int fd;
+
+    if (redir->infile) {
+        fd = open(redir->infile, O_RDONLY);
+        if (fd == -1) {
+            fprintf(stderr, "%s: %s\n", redir->infile, strerror(errno));
+            return -1;
+        }
+        if (dup2(fd, STDIN_FILENO) == -1) {
+            perror("dup2");
+            close(fd);
+            return -1;
+        }
+        if (fd != STDIN_FILENO)
+            close(fd); // fd 0 now refers to the file; the extra descriptor is not needed
+    }
+
+    if (redir->outfile) {
+        int flags = O_WRONLY | O_CREAT | (redir->append ? O_APPEND : O_TRUNC);
+
+        fd = open(redir->outfile, flags, 0644); // 0644 & ~umask if the file is created
+        if (fd == -1) {
+            fprintf(stderr, "%s: %s\n", redir->outfile, strerror(errno));
+            return -1;
+        }
+        if (dup2(fd, STDOUT_FILENO) == -1) {
+            perror("dup2");
+            close(fd);
+            return -1;
+        }
+        if (fd != STDOUT_FILENO)
+            close(fd);
+    }
+    return 0;
+}
+
+// Keeps copies of the shell's stdin/stdout so a built-in can run redirected
+// inside the shell process and the originals can be put back afterwards.
+int save_std_fds(int saved[2])
+{
+    fflush(stdout); // output already buffered (e.g. the prompt) must go to the original stdout, not the redirect target
+    saved[0] = dup(STDIN_FILENO);
+    if (saved[0] == -1)
+        return -1;
+    saved[1] = dup(STDOUT_FILENO);
+    if (saved[1] == -1) {
+        close(saved[0]);
+        return -1;
+    }
+    return 0;
+}
+
+void restore_std_fds(int saved[2])
+{
+    fflush(stdout); // buffered output must reach the redirect target before fd 1 is switched back
+    dup2(saved[0], STDIN_FILENO);
+    dup2(saved[1], STDOUT_FILENO);
+    close(saved[0]);
+    close(saved[1]);
 }

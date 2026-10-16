@@ -1,7 +1,7 @@
 #include "my_shell.h"
 
 //cd, pwd, exit, env, setenv, unsetenv, echo
-int shell_builtins(char** args, char** env, char* initial_directory){
+int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir){
 
 
     if(my_strcmp(args[0], "cd") == 0){
@@ -33,7 +33,7 @@ int shell_builtins(char** args, char** env, char* initial_directory){
     }
     else{
         //Not a builtin cmd
-        return executor(args, env);
+        return executor(args, env, redir);
     }
 
     return 0;
@@ -70,17 +70,49 @@ void shell_loop(char** env){
 
         add_history(input);
 
-        if(my_strcmp(args[0], "setenv") == 0){
-            env = command_setenv(args, env);
-        }
-        else if(my_strcmp(args[0], "unsetenv") == 0){
-            env = command_unsetenv(args, env);
-        }
-        else{
-            shell_builtins(args, env, initial_directory);
+        redirect_t redir;
+        if(parse_redirections(args, &redir) == -1){   // error already reported
+            free_tokens(args);
+            free_redirect(&redir);
+            continue;
         }
 
+        // Built-ins run inside the shell process, so redirect the shell's own
+        // fd 0/1 temporarily and restore them afterwards. External commands are
+        // redirected in the forked child instead (see executor).
+        int saved_fds[2];
+        int fds_saved = 0;
+        int run = 1;
+
+        if(is_builtin(args[0]) && (redir.infile || redir.outfile)){
+            if(save_std_fds(saved_fds) == -1){
+                perror("dup");
+                run = 0;
+            }
+            else{
+                fds_saved = 1;
+                if(apply_redirections(&redir) == -1)
+                    run = 0;
+            }
+        }
+
+        if(run){
+            if(my_strcmp(args[0], "setenv") == 0){
+                env = command_setenv(args, env);
+            }
+            else if(my_strcmp(args[0], "unsetenv") == 0){
+                env = command_unsetenv(args, env);
+            }
+            else{
+                shell_builtins(args, env, initial_directory, &redir);
+            }
+        }
+
+        if(fds_saved)
+            restore_std_fds(saved_fds);
+
         free_tokens(args);
+        free_redirect(&redir);
     }
 
     free(input);

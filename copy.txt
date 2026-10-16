@@ -1,0 +1,12 @@
+a.out
+builtins.c
+copy.txt
+executor.c
+file.txt
+helpers.c
+input_parser.c
+main.c
+Makefile
+my_shell
+my_shell.h
+tes_dir
