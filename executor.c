@@ -14,10 +14,8 @@ int executor(char** args, char** env)
 
     if (pid == 0) // child process
     { 
-        if (child_process(args, env)) {
-            perror("execve");
-            return 1;
-        }
+        child_process(args, env);   // returns only if exec failed (already reported)
+        _exit(127);
     } 
     else // Parent process
     { 

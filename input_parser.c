@@ -50,7 +50,7 @@ char** parse_input(char* input){
 
 //free allocated tokens
 void free_tokens(char** tokens){
-    if(tokens)
+    if(!tokens)
         return;
     
     for(size_t i = 0; tokens[i]; i++)

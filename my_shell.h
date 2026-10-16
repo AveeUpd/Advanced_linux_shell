@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <errno.h>
+#include <string.h>
 
 
 #define MAX_INPUT 1024
@@ -13,11 +15,15 @@ void free_tokens(char** tokens);
 int shell_builtins(char** args, char** env, char* initial_directory);
 
 //Built in func imp
-int command_cd(char** args, char* initial_directory);
+int command_cd(char** args, char* initial_directory, char** env);
 int command_pwd();
 int command_echo(char** args, char** env);
 int command_env(char** env);
 int command_which(char** args, char** env);
+int command_help();
+int command_history(char** args);
+int command_clear();
+void add_history(const char* line);
 
 char** command_setenv(char** args, char** env);
 char** command_unsetenv(char** args, char** env);

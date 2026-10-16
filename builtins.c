@@ -1,17 +1,48 @@
 #include "my_shell.h"
 
-int command_cd(char** args, char* initial_directory){
+int command_cd(char** args, char* initial_directory, char** env){
     (void)initial_directory;
-    if(args[1] == NULL){
-        printf("cd: expected argument to \"cd [dir]\"\n");
+    char* home = my_getenv("HOME", env);
+    char* path = NULL;       // allocated only for "~/..." expansion
+    const char* target = NULL;
+    int ret = 0;
+
+    if(args[1] != NULL && args[2] != NULL){
+        fprintf(stderr, "cd: too many arguments\n");
+        return 1;
     }
-    else if(chdir(args[1]) == 0){
-        // Change directory successful
+
+    if(args[1] == NULL || my_strcmp(args[1], "~") == 0){   // cd  /  cd ~
+        if(home == NULL || home[0] == '\0'){
+            fprintf(stderr, "cd: HOME not set\n");
+            return 1;
+        }
+        target = home;
     }
-    else{
-        perror("cd");
+    else if(args[1][0] == '~' && args[1][1] == '/'){        // cd ~/dir
+        if(home == NULL || home[0] == '\0'){
+            fprintf(stderr, "cd: HOME not set\n");
+            return 1;
+        }
+        path = malloc(my_strlen(home) + my_strlen(args[1]));
+        if(!path){
+            perror("malloc");
+            return 1;
+        }
+        sprintf(path, "%s%s", home, args[1] + 1);
+        target = path;
     }
-    return 0;
+    else{                                                   // cd .. / cd dir
+        target = args[1];
+    }
+
+    if(chdir(target) != 0){
+        fprintf(stderr, "cd: %s: %s\n", target, strerror(errno));
+        ret = 1;
+    }
+
+    free(path);
+    return ret;
 }
 
 int command_pwd(){
@@ -84,7 +115,7 @@ int command_which(char** args, char** env){
     }
 
     //List of builtins
-    const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "exit", "quit", NULL};
+    const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "exit", "quit", NULL};
     for(size_t i = 0; built_in_commands[i]; i++){
         if(my_strcmp(args[1], built_in_commands[i]) == 0){
             printf("%s: shell built-in command\n", args[1]);
@@ -261,4 +292,75 @@ char** command_unsetenv(char** args, char** env){
     // free(env);
     return new_env;
 
+}
+
+
+//help, history, clear
+#define HISTORY_MAX 1000
+
+static char* history_list[HISTORY_MAX];
+static int history_count = 0;       // entries currently stored
+static int history_total = 0;       // commands entered so far (for numbering)
+
+void add_history(const char* line){
+    char* copy = my_strdup(line);
+    if(!copy){
+        perror("malloc");
+        return;
+    }
+
+    //strip trailing newline / carriage return left by getline
+    int len = my_strlen(copy);
+    while(len > 0 && (copy[len - 1] == '\n' || copy[len - 1] == '\r')){
+        copy[--len] = '\0';
+    }
+
+    if(history_count == HISTORY_MAX){      // full: drop oldest, shift the rest
+        free(history_list[0]);
+        for(int i = 1; i < HISTORY_MAX; i++){
+            history_list[i - 1] = history_list[i];
+        }
+        history_count--;
+    }
+    history_list[history_count++] = copy;
+    history_total++;
+}
+
+int command_history(char** args){
+    if(args[1] != NULL){
+        fprintf(stderr, "history: takes no arguments\n");
+        return 1;
+    }
+
+    int first = history_total - history_count + 1;   // number of oldest stored entry
+    for(int i = 0; i < history_count; i++){
+        printf("%5d  %s\n", first + i, history_list[i]);
+    }
+    return 0;
+}
+
+int command_help(){
+    printf("Built-in commands:\n");
+    printf("  cd [dir]          change directory (no arg or ~ = HOME, .. = parent, ~/dir supported)\n");
+    printf("  pwd               print current working directory\n");
+    printf("  echo [-n] [args]  print arguments ($VAR expands an environment variable)\n");
+    printf("  env               print the environment\n");
+    printf("  setenv VAR value  set an environment variable\n");
+    printf("  unsetenv VAR      remove an environment variable\n");
+    printf("  which cmd         show whether cmd is a built-in or its path\n");
+    printf("  history           list previously entered commands\n");
+    printf("  clear             clear the terminal screen\n");
+    printf("  help              show this message\n");
+    printf("  exit | quit       leave the shell\n");
+    printf("\nShell features:\n");
+    printf("  - External commands are searched in PATH, then the current directory\n");
+    printf("  - Each external command runs in a child process (fork/execve/waitpid)\n");
+    return 0;
+}
+
+int command_clear(){
+    //ANSI escape: move cursor home, erase screen, erase scrollback
+    printf("\033[H\033[2J\033[3J");
+    fflush(stdout);
+    return 0;
 }

@@ -5,7 +5,7 @@ int shell_builtins(char** args, char** env, char* initial_directory){
 
 
     if(my_strcmp(args[0], "cd") == 0){
-        return command_cd(args, initial_directory);
+        return command_cd(args, initial_directory, env);
     }
     else if(my_strcmp(args[0], "pwd") == 0){
         return command_pwd();
@@ -18,6 +18,15 @@ int shell_builtins(char** args, char** env, char* initial_directory){
     }
     else if(my_strcmp(args[0], "which") == 0){
         return command_which(args, env);
+    }
+    else if(my_strcmp(args[0], "help") == 0){
+        return command_help();
+    }
+    else if(my_strcmp(args[0], "history") == 0){
+        return command_history(args);
+    }
+    else if(my_strcmp(args[0], "clear") == 0){
+        return command_clear();
     }
     else if(my_strcmp(args[0], "exit") == 0 || my_strcmp(args[0], "quit") == 0){
         exit(EXIT_SUCCESS);
@@ -55,9 +64,13 @@ void shell_loop(char** env){
         // //printf("Input: %s", input);
 
         if(!args[0]){
-            return;
+            free_tokens(args);
+            continue;
         }
-        else if(my_strcmp(args[0], "setenv") == 0){
+
+        add_history(input);
+
+        if(my_strcmp(args[0], "setenv") == 0){
             env = command_setenv(args, env);
         }
         else if(my_strcmp(args[0], "unsetenv") == 0){
@@ -66,10 +79,12 @@ void shell_loop(char** env){
         else{
             shell_builtins(args, env, initial_directory);
         }
+
+        free_tokens(args);
     }
 
-    free_tokens(args);
-    free(env);
+    free(input);
+    free(initial_directory);
 }
 
 int main(int argc, char *argv, char** env){
