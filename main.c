@@ -25,6 +25,9 @@ int shell_builtins(char** args, char** env, char* initial_directory, redirect_t*
     else if(my_strcmp(args[0], "history") == 0){
         return command_history(args);
     }
+    else if(my_strcmp(args[0], "schedule") == 0){
+        return command_schedule(args);
+    }
     else if(my_strcmp(args[0], "clear") == 0){
         return command_clear();
     }

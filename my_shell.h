@@ -68,3 +68,6 @@ char* my_strcpy(char* dest, const char* src);
 char* my_strchr(const char* str, char c);
 char* my_strtok(char* input_string, const char* delimiter);
 char* my_strncpy(char* dest, const char* src, size_t n);
+
+//Scheduler
+int command_schedule(char** args);

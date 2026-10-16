@@ -1,0 +1,648 @@
+#include "my_shell.h"
+
+// ---- CPU scheduling simulator (built-in 'schedule') ----
+
+#define MAX_PROC 20
+#define MAX_PID_LEN 15
+#define MAX_ARRIVAL 10000
+#define MAX_BURST 1000
+#define MAX_PRIORITY 1000
+#define MAX_SEG (MAX_PROC * MAX_BURST + MAX_PROC + 1)   // worst case: Round Robin with quantum 1
+#define GANTT_WIDTH 76                                    // wrap the Gantt chart at this many columns
+
+// Menu choices (also used as the algorithm id)
+enum { ALGO_FCFS = 1, ALGO_SJF, ALGO_PRIORITY, ALGO_RR, ALGO_ALL };
+
+typedef struct sched_proc_s {
+    char pid[MAX_PID_LEN + 1];
+    int at;      // arrival time
+    int bt;      // burst time
+    int pr;      // priority (lower number = higher priority), -1 if not given
+    int rem;     // remaining burst time (Round Robin)
+    int first;   // time the process first got the CPU (-1 until scheduled)
+    int ct;      // completion time
+    int tat;     // turnaround time = CT - AT
+    int wt;      // waiting time    = TAT - BT
+    int rt;      // response time   = first CPU time - AT
+} sched_proc_t;
+
+// One block of the Gantt chart; proc is an index into the process array, -1 = CPU idle
+typedef struct sched_seg_s {
+    int proc;
+    int start;
+    int end;
+} sched_seg_t;
+
+typedef struct sched_avg_s {
+    double wt;
+    double tat;
+    double rt;
+} sched_avg_t;
+
+static sched_seg_t gantt[MAX_SEG];
+static int gantt_count = 0;
+
+static char* sched_line = NULL;   // line buffer shared by all prompts (freed on exit from 'schedule')
+static size_t sched_cap = 0;
+
+// ================= Input =================
+
+// Prints the prompt and reads one line into sched_line.
+// Returns 0 on success, -1 on EOF / read error (control goes back to the shell).
+static int read_sched_line(const char* prompt){
+    for(;;){
+        printf("%s", prompt);
+        fflush(stdout);
+
+        errno = 0;
+        if(getline(&sched_line, &sched_cap, stdin) != -1)
+            return 0;
+
+        if(errno == EINTR){     // SIGCHLD of a background job interrupted the read: just ask again
+            clearerr(stdin);
+            printf("\n");
+            continue;
+        }
+        clearerr(stdin);        // EOF (Ctrl+D)
+        printf("\n");
+        return -1;
+    }
+}
+
+// Reads a line and splits it into whitespace separated tokens with parse_input().
+// Returns the token count (caller must free_tokens), -1 on EOF, -2 if the line is too long (error printed).
+static int read_tokens(const char* prompt, char*** tokens){
+    int count = 0;
+
+    if(read_sched_line(prompt) == -1)
+        return -1;
+
+    if(my_strlen(sched_line) >= MAX_INPUT){
+        printf("Error: input line too long (max %d characters).\n", MAX_INPUT - 1);
+        return -2;
+    }
+
+    *tokens = parse_input(sched_line);
+    while((*tokens)[count])
+        count++;
+    return count;
+}
+
+// Converts token s to an int and checks lo <= value <= hi.
+// On failure prints what is wrong (using label) and returns -1.
+static int parse_field(const char* s, const char* label, int lo, int hi, int* out){
+    int start = (s[0] == '-') ? 1 : 0;
+    int valid = (s[start] != '\0');
+    long v = 0;
+
+    for(int k = start; s[k] && valid; k++){
+        if(s[k] < '0' || s[k] > '9'){
+            valid = 0;
+            break;
+        }
+        if(v < 1000000000L)         // stop growing: avoids overflow, the value is out of range anyway
+            v = v * 10 + (s[k] - '0');
+    }
+
+    if(!valid){
+        printf("Error: %s must be an integer (got '%s').\n", label, s);
+        return -1;
+    }
+    if(start)
+        v = -v;
+
+    if(v < lo){
+        if(lo == 0)
+            printf("Error: %s cannot be negative.\n", label);
+        else if(lo == 1)
+            printf("Error: %s must be greater than 0.\n", label);
+        else
+            printf("Error: %s must be at least %d.\n", label, lo);
+        return -1;
+    }
+    if(v > hi){
+        printf("Error: %s is too large (maximum %d).\n", label, hi);
+        return -1;
+    }
+
+    *out = (int)v;
+    return 0;
+}
+
+// Asks until a single valid integer in [lo, hi] is entered. Returns 0 on success, -1 on EOF.
+static int read_number(const char* prompt, const char* label, int lo, int hi, int* out){
+    for(;;){
+        char** t = NULL;
+        int c = read_tokens(prompt, &t);
+
+        if(c == -1)
+            return -1;
+        if(c == -2)
+            continue;
+        if(c != 1){
+            free_tokens(t);
+            printf("Error: enter a single number for %s.\n", label);
+            continue;
+        }
+
+        int ok = parse_field(t[0], label, lo, hi, out);
+        free_tokens(t);
+        if(ok == 0)
+            return 0;
+    }
+}
+
+// y / n question. Returns 0 on success, -1 on EOF.
+static int read_yes_no(const char* prompt, int* yes){
+    for(;;){
+        char** t = NULL;
+        int c = read_tokens(prompt, &t);
+
+        if(c == -1)
+            return -1;
+        if(c == -2)
+            continue;
+        if(c == 1 && (my_strcmp(t[0], "y") == 0 || my_strcmp(t[0], "Y") == 0 || my_strcmp(t[0], "yes") == 0)){
+            *yes = 1;
+            free_tokens(t);
+            return 0;
+        }
+        if(c == 1 && (my_strcmp(t[0], "n") == 0 || my_strcmp(t[0], "N") == 0 || my_strcmp(t[0], "no") == 0)){
+            *yes = 0;
+            free_tokens(t);
+            return 0;
+        }
+        free_tokens(t);
+        printf("Error: please answer y or n.\n");
+    }
+}
+
+static int pid_exists(const sched_proc_t* p, int count, const char* pid){
+    for(int i = 0; i < count; i++){
+        if(my_strcmp(p[i].pid, pid) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+// Validates one "PID AT BT [Priority]" line (c tokens in t) and, if valid, stores it in p[idx].
+// Returns 0 on success, -1 if invalid (error printed, p[idx] untouched).
+static int parse_process_line(char** t, int c, sched_proc_t* p, int idx, int need_priority){
+    int at = 0, bt = 0, pr = -1;
+
+    if(c < 3 || c > 4 || (need_priority && c != 4)){
+        printf("Error: expected 'PID AT BT %s'.\n", need_priority ? "Priority" : "Priority (or -)");
+        return -1;
+    }
+    if(my_strlen(t[0]) > MAX_PID_LEN){
+        printf("Error: PID '%s' is too long (maximum %d characters).\n", t[0], MAX_PID_LEN);
+        return -1;
+    }
+    if(pid_exists(p, idx, t[0])){
+        printf("Error: duplicate PID '%s'.\n", t[0]);
+        return -1;
+    }
+    if(parse_field(t[1], "arrival time", 0, MAX_ARRIVAL, &at) == -1)
+        return -1;
+    if(parse_field(t[2], "burst time", 1, MAX_BURST, &bt) == -1)
+        return -1;
+
+    if(c == 4){
+        if(my_strcmp(t[3], "-") == 0){
+            if(need_priority){
+                printf("Error: this algorithm needs a priority, '-' is not allowed.\n");
+                return -1;
+            }
+        }
+        else if(parse_field(t[3], "priority", 0, MAX_PRIORITY, &pr) == -1){
+            return -1;
+        }
+    }
+
+    my_strcpy(p[idx].pid, t[0]);
+    p[idx].at = at;
+    p[idx].bt = bt;
+    p[idx].pr = pr;
+    return 0;
+}
+
+// Quick entry: all arrival times are 0, PIDs are P1, P2, ... and only burst times are typed.
+static int read_quick_processes(sched_proc_t* p, int n, int need_priority){
+    char prompt[32];
+
+    printf("\nEnter burst times:\n");
+    for(int i = 0; i < n; i++){
+        snprintf(p[i].pid, sizeof(p[i].pid), "P%d", i + 1);
+        p[i].at = 0;
+        p[i].pr = -1;
+        snprintf(prompt, sizeof(prompt), "%s: ", p[i].pid);
+        if(read_number(prompt, "burst time", 1, MAX_BURST, &p[i].bt) == -1)
+            return -1;
+    }
+
+    if(need_priority){
+        printf("\nEnter priorities (lower number = higher priority):\n");
+        for(int i = 0; i < n; i++){
+            snprintf(prompt, sizeof(prompt), "%s: ", p[i].pid);
+            if(read_number(prompt, "priority", 0, MAX_PRIORITY, &p[i].pr) == -1)
+                return -1;
+        }
+    }
+    return 0;
+}
+
+// Full entry: one line per process "PID AT BT Priority". An invalid line is re-asked.
+static int read_full_processes(sched_proc_t* p, int n, int need_priority){
+    printf("\nEnter process details (PID AT BT Priority):\n");
+    if(!need_priority)
+        printf("(priority is not used by this algorithm: enter '-')\n");
+
+    for(int i = 0; i < n; ){
+        char** t = NULL;
+        int c = read_tokens("", &t);
+
+        if(c == -1)
+            return -1;
+        if(c == -2){
+            printf("Please re-enter process %d:\n", i + 1);
+            continue;
+        }
+
+        if(parse_process_line(t, c, p, i, need_priority) == 0)
+            i++;
+        else
+            printf("Please re-enter process %d:\n", i + 1);
+        free_tokens(t);
+    }
+    return 0;
+}
+
+// Collects the process data. Returns 0 on success, -1 on EOF.
+static int read_processes(sched_proc_t* p, int* n, int need_priority){
+    int quick = 0;
+
+    if(read_number("Enter number of processes: ", "number of processes", 1, MAX_PROC, n) == -1)
+        return -1;
+    if(read_yes_no("All arrival times are 0? (y/n): ", &quick) == -1)
+        return -1;
+
+    return quick ? read_quick_processes(p, *n, need_priority)
+                 : read_full_processes(p, *n, need_priority);
+}
+
+// Prints the menu and reads a choice 0-5. Returns 0 on success, -1 on EOF.
+static int read_menu_choice(int* choice){
+    printf("\nCPU SCHEDULING\n\n");
+    printf("1. FCFS\n");
+    printf("2. SJF\n");
+    printf("3. Priority Scheduling\n");
+    printf("4. Round Robin\n");
+    printf("5. Compare All Algorithms\n");
+    printf("0. Back to Shell\n\n");
+
+    for(;;){
+        char** t = NULL;
+        int c = read_tokens("Choice: ", &t);
+
+        if(c == -1)
+            return -1;
+        if(c == -2)
+            continue;
+        if(c == 1 && t[0][0] >= '0' && t[0][0] <= '5' && t[0][1] == '\0'){
+            *choice = t[0][0] - '0';
+            free_tokens(t);
+            return 0;
+        }
+        free_tokens(t);
+        printf("Error: invalid choice, enter a number from 0 to 5.\n");
+    }
+}
+
+// ================= Algorithms =================
+
+static void add_segment(int proc, int start, int end){
+    // extend the previous block when the same process (or idle) simply continues
+    if(gantt_count > 0 && gantt[gantt_count - 1].proc == proc && gantt[gantt_count - 1].end == start){
+        gantt[gantt_count - 1].end = end;
+        return;
+    }
+    if(gantt_count < MAX_SEG){
+        gantt[gantt_count].proc = proc;
+        gantt[gantt_count].start = start;
+        gantt[gantt_count].end = end;
+        gantt_count++;
+    }
+}
+
+static void complete_process(sched_proc_t* p, int time){
+    p->ct = time;
+    p->tat = p->ct - p->at;
+    p->wt = p->tat - p->bt;
+    p->rt = p->first - p->at;
+}
+
+// Selection key of the non-preemptive algorithms: smaller wins
+static int sched_key(const sched_proc_t* p, int algo){
+    if(algo == ALGO_SJF)
+        return p->bt;
+    if(algo == ALGO_PRIORITY)
+        return p->pr;
+    return p->at;   // FCFS
+}
+
+// 1 if a is strictly better than b (key, then earlier arrival; equal -> the earlier entered one stays)
+static int sched_better(const sched_proc_t* a, const sched_proc_t* b, int algo){
+    if(sched_key(a, algo) != sched_key(b, algo))
+        return sched_key(a, algo) < sched_key(b, algo);
+    return a->at < b->at;
+}
+
+// FCFS, SJF (non-preemptive) and Priority (non-preemptive): they differ only in which
+// arrived process is picked next. When nothing has arrived the CPU idles until the next arrival.
+static void run_nonpreemptive(sched_proc_t* p, int n, int algo){
+    int time = 0, done = 0;
+    int finished[MAX_PROC] = {0};
+
+    while(done < n){
+        int best = -1, next_arrival = -1;
+
+        for(int i = 0; i < n; i++){
+            if(finished[i])
+                continue;
+            if(p[i].at > time){
+                if(next_arrival == -1 || p[i].at < next_arrival)
+                    next_arrival = p[i].at;
+                continue;
+            }
+            if(best == -1 || sched_better(&p[i], &p[best], algo))
+                best = i;
+        }
+
+        if(best == -1){                         // idle until the next process arrives
+            add_segment(-1, time, next_arrival);
+            time = next_arrival;
+            continue;
+        }
+
+        p[best].first = time;
+        add_segment(best, time, time + p[best].bt);
+        time += p[best].bt;
+        finished[best] = 1;
+        done++;
+        complete_process(&p[best], time);
+    }
+}
+
+// Round Robin with a ready queue. Processes that arrive while another one is running are
+// queued before the preempted process is put back at the tail.
+static void run_round_robin(sched_proc_t* p, int n, int quantum){
+    int order[MAX_PROC];            // process indexes sorted by arrival time (stable)
+    int queue[MAX_PROC + 1];        // circular ready queue (a process is queued at most once)
+    int head = 0, tail = 0;
+    int time = 0, done = 0, admitted = 0;
+
+    for(int i = 0; i < n; i++){
+        int j = i;
+        while(j > 0 && p[order[j - 1]].at > p[i].at){
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = i;
+    }
+
+    while(done < n){
+        while(admitted < n && p[order[admitted]].at <= time){
+            queue[tail] = order[admitted++];
+            tail = (tail + 1) % (MAX_PROC + 1);
+        }
+
+        if(head == tail){                       // nothing ready: idle until the next arrival
+            int next = p[order[admitted]].at;
+            add_segment(-1, time, next);
+            time = next;
+            continue;
+        }
+
+        int i = queue[head];
+        head = (head + 1) % (MAX_PROC + 1);
+
+        if(p[i].first == -1)
+            p[i].first = time;
+
+        int slice = (p[i].rem < quantum) ? p[i].rem : quantum;
+        add_segment(i, time, time + slice);
+        time += slice;
+        p[i].rem -= slice;
+
+        while(admitted < n && p[order[admitted]].at <= time){
+            queue[tail] = order[admitted++];
+            tail = (tail + 1) % (MAX_PROC + 1);
+        }
+
+        if(p[i].rem == 0){
+            complete_process(&p[i], time);
+            done++;
+        }
+        else{
+            queue[tail] = i;
+            tail = (tail + 1) % (MAX_PROC + 1);
+        }
+    }
+}
+
+static sched_avg_t compute_avg(const sched_proc_t* p, int n){
+    sched_avg_t avg = {0.0, 0.0, 0.0};
+
+    for(int i = 0; i < n; i++){
+        avg.wt += p[i].wt;
+        avg.tat += p[i].tat;
+        avg.rt += p[i].rt;
+    }
+    avg.wt /= n;
+    avg.tat /= n;
+    avg.rt /= n;
+    return avg;
+}
+
+// Runs one algorithm on a copy of the input (the entered data is reused untouched) and
+// leaves the per-process results in out[] and the Gantt chart in gantt[].
+static sched_avg_t run_algorithm(const sched_proc_t* in, sched_proc_t* out, int n, int algo, int quantum){
+    for(int i = 0; i < n; i++){
+        out[i] = in[i];
+        out[i].rem = out[i].bt;
+        out[i].first = -1;
+        out[i].ct = out[i].tat = out[i].wt = out[i].rt = 0;
+    }
+    gantt_count = 0;
+
+    if(algo == ALGO_RR)
+        run_round_robin(out, n, quantum);
+    else
+        run_nonpreemptive(out, n, algo);
+
+    return compute_avg(out, n);
+}
+
+// ================= Output =================
+
+static const char* algo_name(int algo){
+    switch(algo){
+    case ALGO_FCFS:     return "FCFS";
+    case ALGO_SJF:      return "SJF";
+    case ALGO_PRIORITY: return "Priority Scheduling";
+    default:            return "Round Robin";
+    }
+}
+
+static int pid_width(const sched_proc_t* p, int n){
+    int w = 3;
+
+    for(int i = 0; i < n; i++){
+        if(my_strlen(p[i].pid) > w)
+            w = my_strlen(p[i].pid);
+    }
+    return w;
+}
+
+static int num_digits(int v){
+    int d = 1;
+
+    while(v >= 10){
+        v /= 10;
+        d++;
+    }
+    return d;
+}
+
+static void print_process_table(const sched_proc_t* p, int n, int need_priority){
+    int w = pid_width(p, n);
+
+    printf("\nProcess table:\n");
+    printf("%-*s %6s %6s %8s\n", w, "PID", "AT", "BT", "Priority");
+    for(int i = 0; i < n; i++){
+        if(p[i].pr < 0)
+            printf("%-*s %6d %6d %8s\n", w, p[i].pid, p[i].at, p[i].bt, "-");
+        else
+            printf("%-*s %6d %6d %8d\n", w, p[i].pid, p[i].at, p[i].bt, p[i].pr);
+    }
+    if(need_priority)
+        printf("(lower priority number = higher priority)\n");
+}
+
+static const char* segment_name(const sched_proc_t* p, int proc){
+    return (proc < 0) ? "idle" : p[proc].pid;
+}
+
+// Columns used by one block: the '|' plus a cell wide enough for the name and the start time
+static int segment_width(const sched_seg_t* seg, const sched_proc_t* p){
+    int cell = my_strlen(segment_name(p, seg->proc)) + 2;
+
+    if(num_digits(seg->start) + 1 > cell)
+        cell = num_digits(seg->start) + 1;
+    return cell + 1;
+}
+
+// Prints the chart as  | P1 | P2 |  with the time marks underneath, wrapping long charts
+static void print_gantt(const sched_proc_t* p){
+    int i = 0;
+
+    printf("\nGantt chart:\n");
+    while(i < gantt_count){
+        int j = i, cols = 1;    // cols includes the closing '|'
+
+        while(j < gantt_count){
+            int w = segment_width(&gantt[j], p);
+            if(j > i && cols + w > GANTT_WIDTH)
+                break;
+            cols += w;
+            j++;
+        }
+
+        for(int k = i; k < j; k++){
+            const char* name = segment_name(p, gantt[k].proc);
+            int cell = segment_width(&gantt[k], p) - 1;
+            int left = (cell - my_strlen(name)) / 2;
+            int right = cell - my_strlen(name) - left;
+            printf("|%*s%s%*s", left, "", name, right, "");
+        }
+        printf("|\n");
+
+        for(int k = i; k < j; k++)
+            printf("%-*d", segment_width(&gantt[k], p), gantt[k].start);
+        printf("%d\n", gantt[j - 1].end);
+
+        i = j;
+    }
+}
+
+static void print_metrics(const sched_proc_t* p, int n, sched_avg_t avg){
+    int w = pid_width(p, n);
+
+    printf("\nMetrics:\n");
+    printf("%-*s %6s %6s %6s %6s\n", w, "PID", "CT", "TAT", "WT", "RT");
+    for(int i = 0; i < n; i++)
+        printf("%-*s %6d %6d %6d %6d\n", w, p[i].pid, p[i].ct, p[i].tat, p[i].wt, p[i].rt);
+
+    printf("\nAverage waiting time    : %.2f\n", avg.wt);
+    printf("Average turnaround time : %.2f\n", avg.tat);
+    printf("Average response time   : %.2f\n", avg.rt);
+}
+
+static void print_comparison_row(const char* name, sched_avg_t avg){
+    printf("%-24s %9.2f %9.2f %9.2f\n", name, avg.wt, avg.tat, avg.rt);
+}
+
+// ================= Built-in =================
+
+int command_schedule(char** args){
+    if(args[1] != NULL){
+        fprintf(stderr, "schedule: takes no arguments\n");
+        return 1;
+    }
+
+    for(;;){
+        sched_proc_t input[MAX_PROC], result[MAX_PROC];
+        int choice = 0, n = 0, quantum = 0;
+
+        if(read_menu_choice(&choice) == -1 || choice == 0)
+            break;
+
+        int need_priority = (choice == ALGO_PRIORITY || choice == ALGO_ALL);
+
+        printf("\n");
+        if(read_processes(input, &n, need_priority) == -1)
+            break;
+        if((choice == ALGO_RR || choice == ALGO_ALL) &&
+           read_number("Time quantum: ", "time quantum", 1, MAX_BURST, &quantum) == -1)
+            break;
+
+        print_process_table(input, n, need_priority);
+
+        if(choice == ALGO_ALL){
+            char name[32];
+
+            printf("\nComparison of average metrics:\n");
+            printf("%-24s %9s %9s %9s\n", "Algorithm", "Avg WT", "Avg TAT", "Avg RT");
+            for(int algo = ALGO_FCFS; algo <= ALGO_RR; algo++){
+                sched_avg_t avg = run_algorithm(input, result, n, algo, quantum);
+                if(algo == ALGO_RR)
+                    snprintf(name, sizeof(name), "Round Robin (q=%d)", quantum);
+                else
+                    snprintf(name, sizeof(name), "%s", algo_name(algo));
+                print_comparison_row(name, avg);
+            }
+        }
+        else{
+            sched_avg_t avg = run_algorithm(input, result, n, choice, quantum);
+
+            printf("\n--- %s ---\n", algo_name(choice));
+            print_gantt(result);
+            print_metrics(result, n, avg);
+        }
+    }
+
+    free(sched_line);
+    sched_line = NULL;
+    sched_cap = 0;
+    return 0;
+}

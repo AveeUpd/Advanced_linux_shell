@@ -108,7 +108,7 @@ int command_env(char** env){
 
 char* find_command_in_path(char* command, char** env);
 
-static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "jobs", "exit", "quit", NULL};
+static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "jobs", "schedule", "exit", "quit", NULL};
 
 // 1 if name is a shell built-in (these run inside the shell process)
 int is_builtin(const char* name){
@@ -360,6 +360,7 @@ int command_help(){
     printf("  history           list previously entered commands\n");
     printf("  clear             clear the terminal screen\n");
     printf("  jobs              list background jobs (ID, PID, status, command)\n");
+    printf("  schedule          CPU scheduling simulator (FCFS, SJF, Priority, Round Robin)\n");
     printf("  help              show this message\n");
     printf("  exit | quit       leave the shell\n");
     printf("\nShell features:\n");
