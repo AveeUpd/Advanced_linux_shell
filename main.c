@@ -1,7 +1,7 @@
 #include "my_shell.h"
 
 //cd, pwd, exit, env, setenv, unsetenv, echo
-int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir){
+int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir, int background){
 
 
     if(my_strcmp(args[0], "cd") == 0){
@@ -28,12 +28,15 @@ int shell_builtins(char** args, char** env, char* initial_directory, redirect_t*
     else if(my_strcmp(args[0], "clear") == 0){
         return command_clear();
     }
+    else if(my_strcmp(args[0], "jobs") == 0){
+        return command_jobs(args);
+    }
     else if(my_strcmp(args[0], "exit") == 0 || my_strcmp(args[0], "quit") == 0){
         exit(EXIT_SUCCESS);
     }
     else{
         //Not a builtin cmd
-        return executor(args, env, redir);
+        return executor(args, env, redir, background);   // built-ins ignore the background flag
     }
 
     return 0;
@@ -47,11 +50,20 @@ void shell_loop(char** env){
 
     char* initial_directory = getcwd(NULL, 0); // Get the initial directory
     
+    setup_sigchld_handler();
+
     while (1){
+        reap_jobs(); // report and reap finished background jobs before prompting
         printf("adv_shell> ");
 
-        if(getline(&input, &input_size, stdin) == -1){ //EOF, ctrl+d
-            
+        errno = 0;
+        if(getline(&input, &input_size, stdin) == -1){
+            if(errno == EINTR){     // a child changed state (SIGCHLD) while waiting for input
+                clearerr(stdin);
+                printf("\n");
+                continue;           // top of loop reaps it and shows the prompt again
+            }
+            //EOF, ctrl+d
             perror("getline");
             break;
         }
@@ -69,6 +81,12 @@ void shell_loop(char** env){
         }
 
         add_history(input);
+
+        int background = parse_background(args);
+        if(background == -1){   // error already reported
+            free_tokens(args);
+            continue;
+        }
 
         redirect_t redir;
         if(parse_redirections(args, &redir) == -1){   // error already reported
@@ -104,7 +122,7 @@ void shell_loop(char** env){
                 env = command_unsetenv(args, env);
             }
             else{
-                shell_builtins(args, env, initial_directory, &redir);
+                shell_builtins(args, env, initial_directory, &redir, background);
             }
         }
 

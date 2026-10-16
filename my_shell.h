@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <signal.h>
 
 
 #define MAX_INPUT 1024
@@ -20,9 +21,10 @@ typedef struct redirect_s {
 char** parse_input(char* input);
 void free_tokens(char** tokens);
 int parse_redirections(char** args, redirect_t* redir);
+int parse_background(char** args);
 void free_redirect(redirect_t* redir);
 
-int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir);
+int shell_builtins(char** args, char** env, char* initial_directory, redirect_t* redir, int background);
 
 //Built in func imp
 int command_cd(char** args, char* initial_directory, char** env);
@@ -34,13 +36,19 @@ int is_builtin(const char* name);
 int command_help();
 int command_history(char** args);
 int command_clear();
+int command_jobs(char** args);
 void add_history(const char* line);
 
 char** command_setenv(char** args, char** env);
 char** command_unsetenv(char** args, char** env);
 
 // Executor
-int executor(char** args, char** env, redirect_t* redir);
+int executor(char** args, char** env, redirect_t* redir, int background);
+
+// Background jobs
+void setup_sigchld_handler();
+void reap_jobs();
+void list_jobs();
 int save_std_fds(int saved[2]);
 int apply_redirections(redirect_t* redir);
 void restore_std_fds(int saved[2]);

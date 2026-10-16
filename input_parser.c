@@ -122,3 +122,39 @@ int parse_redirections(char** args, redirect_t* redir){
     }
     return 0;
 }
+
+
+// Detects a trailing '&' (a separate token, or attached as in "sleep 5&") and removes it from args.
+// '&' anywhere else is a syntax error. Returns 1 for a background command, 0 otherwise, -1 on error.
+int parse_background(char** args){
+    size_t n = 0;
+
+    while(args[n])
+        n++;
+    if(n == 0)
+        return 0;
+
+    for(size_t i = 0; i + 1 < n; i++){
+        if(my_strcmp(args[i], "&") == 0){
+            fprintf(stderr, "syntax error: '&' is only allowed at the end of a command\n");
+            return -1;
+        }
+    }
+
+    int last_len = my_strlen(args[n - 1]);
+    if(args[n - 1][last_len - 1] != '&')
+        return 0;
+
+    if(last_len == 1){               // separate "&" token
+        free(args[n - 1]);
+        args[n - 1] = NULL;
+        if(n == 1){
+            fprintf(stderr, "syntax error: missing command before '&'\n");
+            return -1;
+        }
+    }
+    else{                            // attached: strip the '&' character
+        args[n - 1][last_len - 1] = '\0';
+    }
+    return 1;
+}

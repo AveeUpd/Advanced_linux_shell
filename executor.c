@@ -1,10 +1,186 @@
 #include "my_shell.h"
 
-// Executes a command by forking and running it in a child process
-int executor(char** args, char** env, redirect_t* redir)
+// ---- Background job table ----
+#define MAX_JOBS 64
+
+enum { JOB_RUNNING, JOB_DONE, JOB_EXITED, JOB_SIGNALED };
+
+typedef struct job_s {
+    int id;          // job number shown as [id]
+    pid_t pid;
+    char* command;   // command text, malloc'd
+    int state;       // JOB_RUNNING, JOB_DONE (exit 0), JOB_EXITED (exit != 0), JOB_SIGNALED
+    int code;        // exit status or terminating signal number
+} job_t;
+
+static job_t job_table[MAX_JOBS];
+static int job_count = 0;
+
+// The handler only sets this flag (async-signal-safe); the job table is touched
+// only from normal code in the main loop.
+static volatile sig_atomic_t sigchld_received = 0;
+
+static void sigchld_handler(int sig)
+{
+    (void)sig;
+    sigchld_received = 1;
+}
+
+void setup_sigchld_handler()
+{
+    struct sigaction sa;
+
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    // no SA_RESTART: a SIGCHLD while the shell waits for input makes getline fail
+    // with EINTR so the job can be reaped immediately; SA_NOCLDSTOP: only exits matter
+    sa.sa_flags = SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1)
+        perror("sigaction");
+}
+
+// Joins args into one space separated string
+static char* join_args(char** args)
+{
+    size_t len = 1;
+
+    for (size_t i = 0; args[i]; i++)
+        len += my_strlen(args[i]) + 1;
+
+    char* str = malloc(len);
+    if (!str)
+        return NULL;
+
+    char* p = str;
+    for (size_t i = 0; args[i]; i++) {
+        size_t n = my_strlen(args[i]);
+        if (i)
+            *p++ = ' ';
+        memcpy(p, args[i], n);
+        p += n;
+    }
+    *p = '\0';
+    return str;
+}
+
+static void add_job(pid_t pid, char** args)
+{
+    int id = 1;
+
+    for (int i = 0; i < job_count; i++) {
+        if (job_table[i].id >= id)
+            id = job_table[i].id + 1;
+    }
+
+    job_t* job = &job_table[job_count++];
+    job->id = id;
+    job->pid = pid;
+    job->command = join_args(args);
+    job->state = JOB_RUNNING;
+    job->code = 0;
+
+    printf("[%d] %d\n", id, (int)pid);
+}
+
+static void remove_job(int index)
+{
+    free(job_table[index].command);
+    for (int i = index + 1; i < job_count; i++)
+        job_table[i - 1] = job_table[i];
+    job_count--;
+}
+
+static void job_status_text(const job_t* job, char* buf, size_t size)
+{
+    switch (job->state) {
+    case JOB_RUNNING:  snprintf(buf, size, "Running"); break;
+    case JOB_DONE:     snprintf(buf, size, "Done"); break;
+    case JOB_EXITED:   snprintf(buf, size, "Exit %d", job->code); break;
+    default:           snprintf(buf, size, "%s", strsignal(job->code)); break;
+    }
+}
+
+// Non-blocking check of every running job: waitpid(WNOHANG) reaps the child if it
+// has finished (no zombie left) and records how it ended.
+static void update_jobs()
+{
+    for (int i = 0; i < job_count; i++) {
+        job_t* job = &job_table[i];
+        int status;
+        pid_t r;
+
+        if (job->state != JOB_RUNNING)
+            continue;
+
+        do {
+            r = waitpid(job->pid, &status, WNOHANG);
+        } while (r == -1 && errno == EINTR);
+
+        if (r == job->pid) {
+            if (WIFEXITED(status)) {
+                job->code = WEXITSTATUS(status);
+                job->state = (job->code == 0) ? JOB_DONE : JOB_EXITED;
+            }
+            else if (WIFSIGNALED(status)) {
+                job->code = WTERMSIG(status);
+                job->state = JOB_SIGNALED;
+            }
+        }
+        else if (r == -1) {
+            job->state = JOB_DONE; // child no longer exists
+        }
+    }
+}
+
+// Called before each prompt: if SIGCHLD arrived, reap finished jobs, report them and drop them
+void reap_jobs()
+{
+    if (!sigchld_received)
+        return;
+    sigchld_received = 0; // cleared before checking so a signal arriving meanwhile is not lost
+
+    update_jobs();
+    for (int i = 0; i < job_count; ) {
+        if (job_table[i].state != JOB_RUNNING) {
+            char text[64];
+            job_status_text(&job_table[i], text, sizeof(text));
+            printf("[%d]  %-20s %s\n", job_table[i].id, text,
+                   job_table[i].command ? job_table[i].command : "?");
+            remove_job(i);
+        }
+        else {
+            i++;
+        }
+    }
+}
+
+// Built-in 'jobs': print the table; finished jobs are shown once and then removed
+void list_jobs()
+{
+    update_jobs();
+    for (int i = 0; i < job_count; ) {
+        char text[64];
+        job_status_text(&job_table[i], text, sizeof(text));
+        printf("[%d]  %-6d %-20s %s\n", job_table[i].id, (int)job_table[i].pid, text,
+               job_table[i].command ? job_table[i].command : "?");
+        if (job_table[i].state != JOB_RUNNING)
+            remove_job(i);
+        else
+            i++;
+    }
+}
+
+// Executes a command by forking and running it in a child process.
+// A background command is not waited for; it is added to the job table instead.
+int executor(char** args, char** env, redirect_t* redir, int background)
 {
     pid_t pid;
     int status;
+
+    if (background && job_count == MAX_JOBS) {
+        fprintf(stderr, "too many background jobs\n");
+        return 1;
+    }
 
     pid = fork();
     if (pid == -1) {
@@ -14,7 +190,17 @@ int executor(char** args, char** env, redirect_t* redir)
 
     if (pid == 0) // child process
     { 
+        if (background) {
+            setpgid(0, 0); // own process group: terminal Ctrl+C is not delivered to the job
+            int null_fd = open("/dev/null", O_RDONLY); // job must not read the terminal
+            if (null_fd != -1) {
+                dup2(null_fd, STDIN_FILENO);
+                if (null_fd != STDIN_FILENO)
+                    close(null_fd);
+            }
+        }
         // Redirect only in the child: the shell's own fd 0/1 stay untouched
+        // (an explicit '<' overrides the /dev/null above)
         if (apply_redirections(redir) == -1)
             _exit(1);
         child_process(args, env);   // returns only if exec failed (already reported)
@@ -22,9 +208,15 @@ int executor(char** args, char** env, redirect_t* redir)
     } 
     else // Parent process
     { 
-        if (waitpid(pid, &status, 0) == -1) {
-            perror("waitpid");
+        if (background) {
+            add_job(pid, args);
             return 1;
+        }
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) { // EINTR: a background job's SIGCHLD interrupted the wait, so retry
+                perror("waitpid");
+                return 1;
+            }
         }
         if (WIFSIGNALED(status)) {
             printf("Process terminated by signal: %d\n", WTERMSIG(status));

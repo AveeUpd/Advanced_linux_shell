@@ -108,7 +108,7 @@ int command_env(char** env){
 
 char* find_command_in_path(char* command, char** env);
 
-static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "exit", "quit", NULL};
+static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "jobs", "exit", "quit", NULL};
 
 // 1 if name is a shell built-in (these run inside the shell process)
 int is_builtin(const char* name){
@@ -359,11 +359,13 @@ int command_help(){
     printf("  which cmd         show whether cmd is a built-in or its path\n");
     printf("  history           list previously entered commands\n");
     printf("  clear             clear the terminal screen\n");
+    printf("  jobs              list background jobs (ID, PID, status, command)\n");
     printf("  help              show this message\n");
     printf("  exit | quit       leave the shell\n");
     printf("\nShell features:\n");
     printf("  - External commands are searched in PATH, then the current directory\n");
     printf("  - Each external command runs in a child process (fork/execve/waitpid)\n");
+    printf("  - A trailing & runs an external command in the background\n");
     return 0;
 }
 
@@ -371,5 +373,14 @@ int command_clear(){
     //ANSI escape: move cursor home, erase screen, erase scrollback
     printf("\033[H\033[2J\033[3J");
     fflush(stdout);
+    return 0;
+}
+
+int command_jobs(char** args){
+    if(args[1] != NULL){
+        fprintf(stderr, "jobs: takes no arguments\n");
+        return 1;
+    }
+    list_jobs();
     return 0;
 }
