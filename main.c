@@ -34,6 +34,12 @@ int shell_builtins(char** args, char** env, char* initial_directory, redirect_t*
     else if(my_strcmp(args[0], "jobs") == 0){
         return command_jobs(args);
     }
+    else if(my_strcmp(args[0], "status") == 0){
+        return command_status(args);
+    }
+    else if(my_strcmp(args[0], "procinfo") == 0){
+        return command_procinfo(args);
+    }
     else if(my_strcmp(args[0], "exit") == 0 || my_strcmp(args[0], "quit") == 0){
         exit(EXIT_SUCCESS);
     }
@@ -87,12 +93,14 @@ void shell_loop(char** env){
 
         int background = parse_background(args);
         if(background == -1){   // error already reported
+            set_last_status(2);
             free_tokens(args);
             continue;
         }
 
         redirect_t redir;
         if(parse_redirections(args, &redir) == -1){   // error already reported
+            set_last_status(2);
             free_tokens(args);
             free_redirect(&redir);
             continue;
@@ -120,13 +128,22 @@ void shell_loop(char** env){
         if(run){
             if(my_strcmp(args[0], "setenv") == 0){
                 env = command_setenv(args, env);
+                set_last_status(0);
             }
             else if(my_strcmp(args[0], "unsetenv") == 0){
                 env = command_unsetenv(args, env);
+                set_last_status(0);
             }
             else{
-                shell_builtins(args, env, initial_directory, &redir, background);
+                int ret = shell_builtins(args, env, initial_directory, &redir, background);
+                // external commands set the status themselves (executor); built-ins return it.
+                // 'status' and 'echo $?' must not overwrite what they just reported.
+                if(is_builtin(args[0]) && my_strcmp(args[0], "status") != 0)
+                    set_last_status(ret);
             }
+        }
+        else{
+            set_last_status(1); // redirection setup failed
         }
 
         if(fds_saved)
@@ -140,7 +157,7 @@ void shell_loop(char** env){
     free(initial_directory);
 }
 
-int main(int argc, char *argv, char** env){
+int main(int argc, char **argv, char** env){
     (void)argc;
     (void)argv;
 

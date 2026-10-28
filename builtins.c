@@ -70,7 +70,10 @@ int command_echo(char** args, char** env){
     }
 
     for(; args[i]; i++){
-        if(args[i][0] == '$'){
+        if(my_strcmp(args[i], "$?") == 0){
+            printf("%d", get_last_status());
+        }
+        else if(args[i][0] == '$'){
             char* value = my_getenv(args[i] + 1, env);
             if(value){
                 printf("%s", value);
@@ -108,7 +111,7 @@ int command_env(char** env){
 
 char* find_command_in_path(char* command, char** env);
 
-static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "jobs", "schedule", "exit", "quit", NULL};
+static const char* built_in_commands[] = {"cd", "pwd", "echo", "env", "setenv", "unsetenv", "which", "help", "history", "clear", "jobs", "status", "procinfo", "schedule", "exit", "quit", NULL};
 
 // 1 if name is a shell built-in (these run inside the shell process)
 int is_builtin(const char* name){
@@ -360,6 +363,8 @@ int command_help(){
     printf("  history           list previously entered commands\n");
     printf("  clear             clear the terminal screen\n");
     printf("  jobs              list background jobs (ID, PID, status, command)\n");
+    printf("  status            print the exit status of the last command (also: echo $?)\n");
+    printf("  procinfo [pid|%%N] show PID, PPID, state, process group of a process (default: the shell)\n");
     printf("  schedule          CPU scheduling simulator (FCFS, SJF, Priority, Round Robin)\n");
     printf("  help              show this message\n");
     printf("  exit | quit       leave the shell\n");
@@ -383,5 +388,14 @@ int command_jobs(char** args){
         return 1;
     }
     list_jobs();
+    return 0;
+}
+
+int command_status(char** args){
+    if(args[1] != NULL){
+        fprintf(stderr, "status: takes no arguments\n");
+        return 1;
+    }
+    printf("%d\n", get_last_status());
     return 0;
 }

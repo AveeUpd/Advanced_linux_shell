@@ -37,6 +37,8 @@ int command_help();
 int command_history(char** args);
 int command_clear();
 int command_jobs(char** args);
+int command_status(char** args);
+int command_procinfo(char** args);
 void add_history(const char* line);
 
 char** command_setenv(char** args, char** env);
@@ -49,6 +51,9 @@ int executor(char** args, char** env, redirect_t* redir, int background);
 void setup_sigchld_handler();
 void reap_jobs();
 void list_jobs();
+pid_t job_pid_by_id(int id);
+int get_last_status();
+void set_last_status(int status);
 int save_std_fds(int saved[2]);
 int apply_redirections(redirect_t* redir);
 void restore_std_fds(int saved[2]);
