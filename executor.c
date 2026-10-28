@@ -13,6 +13,12 @@ typedef struct job_s {
     int code;        // exit status or terminating signal number
 } job_t;
 
+// Exit status of the last command ($? / status): exit code, or 128+signal if it was killed
+static int last_status = 0;
+
+int get_last_status() { return last_status; }
+void set_last_status(int status) { last_status = status; }
+
 static job_t job_table[MAX_JOBS];
 static int job_count = 0;
 
@@ -154,6 +160,16 @@ void reap_jobs()
     }
 }
 
+// PID of the job with the given [id], or -1 if there is no such job
+pid_t job_pid_by_id(int id)
+{
+    for (int i = 0; i < job_count; i++) {
+        if (job_table[i].id == id)
+            return job_table[i].pid;
+    }
+    return -1;
+}
+
 // Built-in 'jobs': print the table; finished jobs are shown once and then removed
 void list_jobs()
 {
@@ -179,12 +195,14 @@ int executor(char** args, char** env, redirect_t* redir, int background)
 
     if (background && job_count == MAX_JOBS) {
         fprintf(stderr, "too many background jobs\n");
+        last_status = 1;
         return 1;
     }
 
     pid = fork();
     if (pid == -1) {
         perror("fork");
+        last_status = 1;
         return 1;
     }
 
@@ -210,16 +228,22 @@ int executor(char** args, char** env, redirect_t* redir, int background)
     { 
         if (background) {
             add_job(pid, args);
+            last_status = 0; // starting a background job succeeded
             return 1;
         }
         while (waitpid(pid, &status, 0) == -1) {
             if (errno != EINTR) { // EINTR: a background job's SIGCHLD interrupted the wait, so retry
                 perror("waitpid");
+                last_status = 1;
                 return 1;
             }
         }
-        if (WIFSIGNALED(status)) {
+        if (WIFEXITED(status)) {
+            last_status = WEXITSTATUS(status);
+        }
+        else if (WIFSIGNALED(status)) {
             printf("Process terminated by signal: %d\n", WTERMSIG(status));
+            last_status = 128 + WTERMSIG(status);
         }
         // if (WTERMSIG(status) == SIGSEGV) {
         //     perror("segmentation fault");
